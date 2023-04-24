@@ -1,4 +1,4 @@
-module rmt_finder
+module ineeditrightnow
 
 go 1.19
 
