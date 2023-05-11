@@ -3,15 +3,15 @@ package main
 import (
 	"fmt"
 	"ineeditrightnow/src/search"
+	"ineeditrightnow/src/store"
 	"sync"
 )
-
-const API_KEY string = "AIzaSyDyYN_n-M5HE_1BOrJOEoUzD9Bg-n3eUCE"
 
 func main() {
 
 	var wg sync.WaitGroup
 	urls := search.GetAllRmtUrls(search.BuildGoogleMapSearchUrl())
+
 	fmt.Println("-----------------------")
 	jppUrls := []string{}
 	for _, url := range urls {
@@ -37,10 +37,23 @@ func main() {
 		wg.Add(1)
 		go func(url string) {
 			defer wg.Done()
-			fmt.Printf("%+v\n", search.GetCalendar(url))
+			search.GetCalendar(url)
 		}(url)
 	}
 	wg.Wait()
+	for a, b := range store.GetStore() {
+		fmt.Printf("%s: %s,%d,%s,%s,%+v,%+v\n", a,
+			b.URL,
+			b.LocationID,
+			b.Link,
+			b.CalendarLink,
+			b.Staffs,
+			b.Disciplines)
+	}
 
-	fmt.Println("-----------------------")
+	// fmt.Println(search.GetAllRmtUrls(search.BuildGoogleMapSearchUrl()))
+	// search.GetJaneappUrl("https://www.sensemassage.ca/")
+	// search.GetJaneappUrl("http://www.momentumwellnesscentre.com/")
+	// fmt.Println(search.GetCalendarUrls("https://sensemassage.janeapp.com/"))
+	// fmt.Println("-----------------------")
 }

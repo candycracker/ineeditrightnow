@@ -1,40 +1,94 @@
 package store
 
-import "errors"
+import (
+	"errors"
+	"sync"
+)
 
 type Store struct {
-	Store      string
-	LocationID int
-	URL        string
-	Staffs     map[int]*Staff // key: StaffMemberID
+	URL          string
+	LocationID   int
+	Link         string //office website
+	CalendarLink string
+	Staffs       map[string]*Staff   // key: StaffMemberID
+	Disciplines  map[int]*Discipline //key: discipline id
+}
+type Discipline struct {
+	Name       string
+	ID         int
+	Treatments map[int]*Treatment // key: treament id
 }
 
 type Staff struct {
 	Staff         string
-	StaffMemberID int
+	StaffMemberID string
 	Treatments    map[int]*Treatment // key: TreatmentID
 }
 
 type Treatment struct {
-	Treatment   string
-	TreatmentID int
+	ID       int
+	Duration int
+	Fee      float64
 }
 
-var Stores map[string]*Store
+var stores map[string]*Store
+var mutex *sync.Mutex
 
 func init() {
-	Stores = make(map[string]*Store)
+	stores = make(map[string]*Store)
+	mutex = &sync.Mutex{}
 }
 
-func AddNewStore(store string, id int, url string) error {
-	Stores[store] = &Store{Store: store, LocationID: id, URL: url}
+func GetStore() map[string]*Store {
+	return stores
+}
+
+func FindStore(jUrl string) *Store {
+	return stores[jUrl]
+}
+
+func AddStore(url string, id int, link string) error {
+	if stores[url] == nil {
+		stores[url] = &Store{URL: url, LocationID: id, Link: link, Staffs: make(map[string]*Staff), Disciplines: make(map[int]*Discipline)}
+	} else {
+		stores[url].URL = url
+		stores[url].LocationID = id
+		stores[url].URL = url
+	}
 	return nil
 }
 
-func (s *Store) AddStaff(store string, id int, url string) error {
+func (s *Store) AddDisciplines(id int, name string) error {
+	mutex.Lock()
+	defer mutex.Unlock()
 	if s == nil {
 		return errors.New("nil")
 	}
-	s.Staffs[id] = &Staff{}
+	s.Disciplines[id] = &Discipline{ID: id, Name: name}
+	return nil
+}
+
+func (d *Discipline) AddTreatment(id, duration int, fee float64) error {
+	mutex.Lock()
+	defer mutex.Unlock()
+	if d == nil {
+		return errors.New("nil")
+	}
+	if d.Treatments == nil {
+		d.Treatments = make(map[int]*Treatment)
+	}
+
+	d.Treatments[id] = &Treatment{ID: id, Duration: duration, Fee: fee}
+	return nil
+}
+
+func (s *Store) AddStaff(staff string, id string) error {
+
+	mutex.Lock()
+	defer mutex.Unlock()
+	if s == nil {
+		return errors.New("nil")
+	}
+	s.Staffs[id] = &Staff{Staff: staff, StaffMemberID: id}
 	return nil
 }
