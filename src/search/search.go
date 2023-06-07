@@ -1,11 +1,8 @@
 package search
 
 import (
-	"encoding/json"
 	"fmt"
 	"ineeditrightnow/src/store"
-	"io"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,25 +11,36 @@ import (
 )
 
 var urlPrefix = "https://www.google.ca/maps/search/rmt+near+me/@"
-var lat string = "49.119423"
-var lng string = "-123.1705926"
 var rng string = "12z"
 var reqTreatment = "massage"
 var reqDuration = 60
+var regexJaneappUrl = regexp.MustCompile(`https:\/\/\w+.janeapp.com\/`)
+var regexUrlWithLocation = regexp.MustCompile(`https:\/\/(.*/?).janeapp.com\/locations\/(.*/?)\/book`)
+var regexMerchant = regexp.MustCompile(`https://([a-zA-Z\d]+).janeapp.com/`)
+var regexAddress = regexp.MustCompile(`at:!(.*/?)!!Dir`)
+var regexPhone = regexp.MustCompile(`\d+[.-]\d+[.-]\d+`)
+var regexEmail = regexp.MustCompile(`([a-zA-Z|\d]+)@(.*?)\.com`)
+var regexDisciplineAndTreatment = regexp.MustCompile(`#/discipline/\d+/treatment/\d+`)
+var regexLocation = regexp.MustCompile(`App.location_id = (\d+)`)
 
 const RMT_PRICE_COEFFICIENT float64 = 1.8
 
 var treamentPattern = map[string][]string{
-	"massage":      {"registered massage therapy", "rmt"},
-	"osteopathy":   {"osteopathy"},
-	"acupuncture":  {"acupuncture"},
-	"bodywork":     {"bodywork"},
-	"chiropractic": {"chiropractic"},
+	"massage":          {"registered massage therapy", "rmt", "massage therapy", "massage"},
+	"osteopathy":       {"osteopathy"},
+	"acupuncture":      {"acu", "acupuncture"},
+	"bodywork":         {"bodywork"},
+	"chiropractic":     {"chiropractic"},
+	"pilates":          {"pilates"},
+	"athletic therapy": {"athletic therapy"},
+	"counsell":         {"counsell"},
+	"vestibular":       {"vestibular"},
+	"physiotherapy":    {"physio", "physiotherapy"},
 }
 
 var regTreaments = make(map[string][]*regexp.Regexp)
 var regPrice = regexp.MustCompile(`\$\d*.\d*`)
-var durRegex = regexp.MustCompile(`\d*.?min`)
+var durRegex = regexp.MustCompile(`\d+\s?min`)
 
 func init() {
 	for treament, patterns := range treamentPattern {
@@ -44,7 +52,7 @@ func init() {
 	}
 }
 
-func BuildGoogleMapSearchUrl() string {
+func BuildGoogleMapSearchUrl(lat, lng string) string {
 	return urlPrefix + lat + "," + lng + "," + rng
 }
 
@@ -73,50 +81,114 @@ func GetAllRmtUrls(url string) []string {
 	return urls
 }
 
-func GetJaneappUrl(link string) []string {
+func getJaneappUrl(orgUrl string) string {
 
-	locationID := 1
-	crawl(link, []onHTML{{"a[href]", func(h *colly.HTMLElement) {
-
+	jUrl := ""
+	crawl(orgUrl, []onHTML{{"a[href]", func(h *colly.HTMLElement) {
 		val := h.Attr("href")
-		regexUrl := regexp.MustCompile(`https:\/\/\w+.janeapp.com\/`)
-		regexUrlWithLocation := regexp.MustCompile(`https:\/\/\w+.janeapp.com\/locations\/.*\/book`)
-
-		if regexUrlWithLocation.MatchString(val) {
-			url := regexUrlWithLocation.FindString(val)
-			if store.FindStore(url) == nil {
-				store.AddStore(url, locationID, link)
-				locationID++
-			}
-		} else if regexUrl.MatchString(val) {
-			url := regexUrl.FindString(val)
-			if store.FindStore(url) == nil {
-				store.AddStore(url, locationID, link)
-			}
-		} else {
-			return
+		if url := regexJaneappUrl.FindString(val); url != "" {
+			jUrl = url
 		}
 	}}, {"iframe", func(h *colly.HTMLElement) {
 		val := h.Attr("src")
-		regexUrl := regexp.MustCompile(`https:\/\/\w+.janeapp.com\/`)
-		if regexUrl.MatchString(val) {
-			url := regexUrl.FindString(val)
-			if store.FindStore(url) == nil {
-				store.AddStore(url, locationID, link)
-			}
+		if url := regexJaneappUrl.FindString(val); url != "" {
+			jUrl = url
 		}
 	}}})
 
-	urls := []string{}
-	for _, s := range store.GetStore() {
-		urls = append(urls, s.URL)
-	}
-	return urls
+	return jUrl
 }
 
-func convertUrl(url string, locID, discID, trmtID int) string {
-	newUrl := fmt.Sprintf("%sapi/v2/openings/for_discipline?location_id=%d&discipline_id=%d&treatment_id=%d&date=&num_days=7", url, locID, discID, trmtID)
-	return newUrl
+func GetMerchant(orgUrl string) *store.Merchant {
+
+	jUrl := getJaneappUrl(orgUrl)
+
+	var m = new(store.Merchant)
+
+	if finds := regexMerchant.FindStringSubmatch(jUrl); len(finds) == 2 {
+		m = &store.Merchant{Name: finds[1], Website: jUrl, Stores: []*store.Store{}}
+		store.AddNewMerchant(finds[1], m)
+	} else {
+		return nil
+	}
+
+	multiLoc := false
+
+	crawl(jUrl, []onHTML{{"a[href]", func(h *colly.HTMLElement) {
+
+		val := h.Attr("href")
+		if url := regexUrlWithLocation.FindString(val); url != "" {
+			if finds := regexUrlWithLocation.FindStringSubmatch(val); len(finds) == 3 {
+				subvision := finds[2]
+				s := store.NewStore(subvision, url)
+				m.Stores = append(m.Stores, s)
+			}
+			multiLoc = true
+		}
+
+	}}})
+	if !multiLoc {
+		s := store.NewStore("#", jUrl)
+		m.Stores = append(m.Stores, s)
+	}
+
+	for _, store := range m.Stores {
+
+		crawl(store.Url, []onHTML{{"div.col-sm-offset-3", func(h *colly.HTMLElement) {
+
+			x := strings.Replace(h.Text, "\n", "!", -1)
+			phone := regexPhone.FindString(x)
+			email := regexEmail.FindString(x)
+			address := ""
+
+			if finds := regexAddress.FindStringSubmatch(x); len(finds) == 2 {
+				address = finds[1]
+			}
+			store.Address = address
+			store.Phone = phone
+			store.Email = email
+
+		}}, {
+			"script", func(h *colly.HTMLElement) {
+
+				if strings.Contains(h.Text, "location_id") {
+					find := regexLocation.FindString(h.Text)
+					idStr := regexLocation.FindStringSubmatch(find)[1]
+					id, _ := strconv.Atoi(idStr)
+					store.LocationID = id
+				}
+
+			},
+		}})
+
+		GetCalendarUrls(store)
+
+	}
+
+	return m
+}
+
+func getTreamentAttr(attr string) string {
+	for t, regexs := range regTreaments {
+		for _, regex := range regexs {
+			if regex.MatchString(attr) {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+func getDurationAttr(attr string) int {
+
+	if durRegex.MatchString(attr) {
+		durStr := regexp.MustCompile(`\d+`).FindString(durRegex.FindString(attr))
+		if d, err := strconv.Atoi(durStr); err == nil {
+			return d
+		}
+	}
+
+	return -1
 }
 
 func getTreamentAndDuration(attr string) (string, int) {
@@ -126,10 +198,6 @@ func getTreamentAndDuration(attr string) (string, int) {
 		for _, regex := range regexs {
 			if regex.MatchString(attr) {
 				treatment = t
-				if regexp.MustCompile(`icbc`).MatchString(attr) {
-					treatment = "icbc " + treatment
-				}
-				break
 			}
 		}
 	}
@@ -162,61 +230,86 @@ func getPrice(attr string) float64 {
 	return price
 }
 
-func GetCalendarUrls(url string) string {
-
+func GetCalendarUrls(store *store.Store) string {
 	cldUrls := ""
+	crawl(store.Url, []onHTML{{"div.discipline-container", func(h *colly.HTMLElement) {
+		h.ForEach("section", func(_ int, e *colly.HTMLElement) {
 
-	crawl(url, []onHTML{{"a[href]", func(h *colly.HTMLElement) {
-
-		treamentAttr := h.DOM.Find("strong").Text()
-		if len(treamentAttr) == 0 {
-			return
-		}
-
-		treamentAttr = strings.ToLower(treamentAttr)
-
-		priceAttr := h.DOM.Find("small").Text()
-
-		treament, duration := getTreamentAndDuration(treamentAttr)
-		price := getPrice(priceAttr)
-
-		if duration == -1 || price == -1 {
-			return
-		}
-
-		// if reqTreatment != treament && reqDuration != duration {
-		// 	return
-		// }
-		// if price < float64(duration)*RMT_PRICE_COEFFICIENT {
-		// 	return
-		// }
-
-		p := strings.Split(h.Attr("href"), "/")
-		fmt.Println(url, p, treament, duration)
-		store := store.FindStore(url)
-		if store == nil {
-			return
-		}
-
-		locationID := store.LocationID
-		disciplineID, _ := strconv.Atoi(p[2])
-		treatmentID, _ := strconv.Atoi(p[4])
-		store.AddDisciplines(disciplineID, treament)
-		store.Disciplines[disciplineID].AddTreatment(treatmentID, duration, price)
-		// fmt.Println(">>>", locationID, disciplineID, treatmentID, treament, duration, price)
-		cldUrls = convertUrl(url, locationID, disciplineID, treatmentID)
-		store.CalendarLink = cldUrls
-	}}, {
-		"a[href].photo", func(h *colly.HTMLElement) {
-			staffID := strings.Split(h.Attr("href"), "/")[2]
-			staff := h.ChildText("div.hidden-xs")
-			store := store.FindStore(url)
-			if store == nil {
+			content := ""
+			for _, node := range e.DOM.Nodes {
+				if len(node.Attr) != 1 {
+					//TO DO: not sure if there is other case that have multiple attr
+					continue
+				}
+				content = node.Attr[0].Val
+				//TO DO: not sure if there is other case that have multiple e.DOM.Nodes
+				break
+			}
+			if content == "" {
 				return
 			}
-			store.AddStaff(staff, staffID)
-		},
-	}})
+
+			e.ForEach("nav", func(_ int, nav *colly.HTMLElement) {
+				navigation := nav.Attr("aria-labelledby")
+
+				raw := strings.Split(navigation, "_")
+				if len(raw) != 4 {
+					return
+				}
+				id, err := strconv.Atoi(raw[1])
+				if err != nil {
+					return
+				}
+
+				discipline := store.GetDiscipline(content)
+
+				if discipline == nil {
+					discipline = store.AddNewDiscipline(content, id, content)
+				}
+
+				if strings.HasSuffix(navigation, "staff_navigation") {
+					nav.ForEach("a[href].photo", func(_ int, s *colly.HTMLElement) {
+						staffID := strings.Split(s.Attr("href"), "/")[2]
+						staff := s.ChildText("div.hidden-xs")
+						store.AddStaff(staff, staffID)
+						store.Staffs[staffID].AddNewTreatment(id)
+					})
+				} else if strings.HasSuffix(navigation, "treatments_navigation") {
+					nav.ForEach("a[href]", func(_ int, s *colly.HTMLElement) {
+
+						attr := s.Attr("href")
+						if !regexDisciplineAndTreatment.MatchString(attr) {
+							return
+						}
+						content1 := s.ChildText("strong")
+						content2 := s.ChildText("small")
+						content1 = strings.ToLower(content1)
+						content2 = strings.Replace(content2, "\n", " ", -1)
+						content2 = strings.ToLower(content2)
+
+						duration := getDurationAttr(content1)
+						if duration == -1 {
+							duration = getDurationAttr(content2)
+						}
+						price := getPrice(content2)
+
+						if price == -1 {
+							price = getPrice(content1)
+						}
+
+						hrefContent := strings.Split(attr, "/")
+						treatmentID, _ := strconv.Atoi(hrefContent[4])
+
+						discipline.AddNewTreatment(treatmentID, duration, price, content1)
+					})
+				}
+
+			})
+
+		})
+
+	}}})
+
 	return cldUrls
 }
 
@@ -236,47 +329,4 @@ func crawl(url string, on []onHTML) {
 		fmt.Printf("Error: %s\n", e.Error())
 	})
 	c.Visit(url)
-}
-
-type Calendar struct {
-	StaffMemberID       int    `json:"staff_member_id"`
-	LocationID          int    `json:"location_id"`
-	TreatmentID         int    `json:"treatment_id"`
-	Duration            int    `json:"duration"`
-	StartAt             string `json:"start_at"`
-	EndAt               string `json:"end_at"`
-	RoomID              int    `json:"room_id"`
-	CallToBook          bool   `json:"call_to_book"`
-	State               string `json:"state"`
-	Status              string `json:"status"`
-	ParentAppointmentID string `json:"parent_appointment_id"`
-}
-
-func GetCalendar(url string) []Calendar {
-
-	data := []Calendar{}
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return data
-	}
-	req.Header.Add("Cookie", "_front_desk_session=")
-	resp, err := client.Do(req)
-	if err != nil {
-		return data
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode > 400 {
-		fmt.Println("Status code: ", resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return data
-	}
-
-	json.Unmarshal(body, &data)
-
-	return data
 }
